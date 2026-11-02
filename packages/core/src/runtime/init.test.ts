@@ -6422,7 +6422,7 @@ describe("initSandboxRuntimeModular", () => {
   describe("a voiceover routed through Web Audio", () => {
     const ctx = useMockAudioContext();
 
-    it("holds the timeline while the voiceover buffers instead of seeking it forward", async () => {
+    it("holds the timeline for the start wait while the voiceover buffers instead of seeking it forward", async () => {
       const raf = createManualRaf();
       vi.spyOn(performance, "now").mockImplementation(() => raf.now());
       window.requestAnimationFrame =
@@ -6442,7 +6442,7 @@ describe("initSandboxRuntimeModular", () => {
       await startPlayback();
       expect(ctx.mediaElementSources).toBe(1);
 
-      for (let frame = 0; frame < 120; frame++) {
+      for (let frame = 0; frame < 15; frame++) {
         ctx.time += 1 / 60;
         raf.step(1000 / 60);
       }
