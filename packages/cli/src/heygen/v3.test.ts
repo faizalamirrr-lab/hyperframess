@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -43,6 +43,25 @@ describe("runJob", () => {
       "https://api.test/v3/x/j1",
     ]);
     expect(new Headers(calls[0]!.init.headers).get("Idempotency-Key")).toBe("hf-key");
+  });
+
+  it("logs a job that is done at once one time, and a waited-for job at each end", async () => {
+    const projectDir = mkdtempSync(join(tmpdir(), "hf-v3-log-"));
+    const rows = () =>
+      readFileSync(join(projectDir, ".hyperframes/heygen-jobs.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .map((row) => JSON.parse(row).status);
+    const log = { projectDir, what: "a line" };
+    vi.stubGlobal("fetch", async () => reply(200, { data: { id: "j1", status: "completed" } }));
+    await runJob("/v3/x", {}, "k1", (id) => id, { log });
+    expect(rows()).toEqual(["completed"]);
+    const answers = ["pending", "completed"].map((status) =>
+      reply(200, { data: { id: "j2", status } }),
+    );
+    vi.stubGlobal("fetch", async () => answers.shift()!);
+    await runJob("/v3/x", {}, "k2", (id) => id, { log, intervalMs: 1 });
+    expect(rows()).toEqual(["completed", "pending", "completed"]);
   });
 
   it("turns refusals into what to do next", async () => {
@@ -131,6 +150,38 @@ describe("runJob", () => {
     ).rejects.toThrow("out of HyperFrames credits");
     await run("hf-broke", done());
     expect(keys).toEqual(["hf-broke", "hf-broke-1"]);
+  });
+
+  it("puts the key in the body for a route that dedupes there, and moves it only past a failed job", async () => {
+    const jobs = new Map<string, string>();
+    const sent: string[] = [];
+    let status = "completed";
+    let lose = false;
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      if (init.method !== "POST") return reply(200, { data: { id: "j", status } });
+      // like /v3/background-removals: the header is ignored, the body's request_id picks the job
+      const id = String(JSON.parse(String(init.body)).request_id);
+      sent.push(id);
+      if (!jobs.has(id)) jobs.set(id, `job-${jobs.size}`);
+      if (lose) return reply(408, { message: "timeout" });
+      return reply(200, { data: { id: jobs.get(id), status } });
+    });
+    const go = () =>
+      runJob("/v3/background-removals", { layers: ["foreground"] }, "hf-cut", (id) => id, {
+        bodyKey: "request_id",
+        intervalMs: 1,
+      });
+    lose = true;
+    await expect(go()).rejects.toThrow();
+    lose = false;
+    await go();
+    expect(jobs.size).toBe(1);
+    status = "failed";
+    await expect(go()).rejects.toThrow();
+    status = "completed";
+    await go();
+    expect(sent).toEqual(["hf-cut", "hf-cut", "hf-cut", "hf-cut-1"]);
+    expect(jobs.size).toBe(2);
   });
 
   it.each([401, 403, 408, 409, 425, 429])(
